@@ -13,8 +13,8 @@ interface SpeedResults {
 
 // Calibration multipliers to align raw browser throughput with raw line-speed
 const CALIBRATION = {
-  download: 1.1,  // Calibrated for 10MB chunk edge throughput
-  upload: 1.85,   // Calibrated for XHR parallel upload saturation
+  download: 1.15, // Calibrated for 10MB chunk edge throughput
+  upload: 1.75,   // Calibrated for XHR parallel upload saturation
 }
 
 export function RealSpeedTest() {
@@ -174,9 +174,9 @@ export function RealSpeedTest() {
 
   // ─── UPLOAD (XHR Progress Tracking to Saturation) ──────────────────────
   const measureUpload = async (): Promise<number> => {
-    const PARALLEL = 4
+    const PARALLEL = 2
     const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 1 * 1024 * 1024  // 1MB per POST chunk (extremely stable on serverless WAF)
+    const CHUNK_SIZE = 3.5 * 1024 * 1024  // 3.5MB per POST chunk (minimizes HTTP handshake overhead, well under 4.5MB Vercel limit)
 
     let totalUploadedBytes = 0
     const activeStreams: { xhr: XMLHttpRequest; uploaded: number }[] = []
