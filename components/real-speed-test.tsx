@@ -121,7 +121,7 @@ export function RealSpeedTest() {
     const downloadStream = async () => {
       while (!finished && !signal?.aborted) {
         try {
-          const res = await fetch(`/api/download?size=${CHUNK_BYTES}&_=${Date.now()}-${Math.random()}`, {
+          const res = await fetch(`https://speed.cloudflare.com/__down?bytes=${CHUNK_BYTES}&_=${Date.now()}-${Math.random()}`, {
             cache: 'no-store',
             signal,
           })
@@ -195,7 +195,7 @@ export function RealSpeedTest() {
       if (finished || abortControllerRef.current?.signal.aborted) return
 
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', `/api/upload?_=${Date.now()}-${index}-${Math.random()}`, true)
+      xhr.open('POST', `https://speed.cloudflare.com/__up?_=${Date.now()}-${index}-${Math.random()}`, true)
       
       const streamInfo = { xhr, uploaded: 0 }
       activeStreams[index] = streamInfo
