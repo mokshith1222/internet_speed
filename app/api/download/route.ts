@@ -7,8 +7,8 @@ export async function GET(request: Request) {
   // Clamp size between 1MB and 25MB to prevent abuse
   const clampedSize = Math.max(1024 * 1024, Math.min(size, 25 * 1024 * 1024))
 
-  // Define a reasonable chunk size for streaming
-  const chunkSize = 131072 // 128KB chunks
+  // Define a reasonable chunk size for streaming (64KB is the maximum limit for crypto.getRandomValues)
+  const chunkSize = 65536 // 64KB chunks
   let bytesSent = 0
 
   // Create a ReadableStream that generates fresh random bytes on every pull.

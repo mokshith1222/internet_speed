@@ -266,8 +266,12 @@ export function RealSpeedTest() {
   }
 
   const calculateNeedleAngle = (speed: number) => {
-    if (speed <= 0 || phase === 'idle') return -90
-    const logSpeed = Math.log10(Math.max(speed, 0.1) + 1)
+    let currentSpeed = speed
+    if (!isRunning && results) {
+      currentSpeed = results.download
+    }
+    if (currentSpeed <= 0 || (isRunning && phase === 'ping')) return -90
+    const logSpeed = Math.log10(Math.max(currentSpeed, 0.1) + 1)
     const logMax = Math.log10(1001)
     return -90 + Math.min(logSpeed / logMax, 1) * 180
   }
