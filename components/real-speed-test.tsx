@@ -174,9 +174,9 @@ export function RealSpeedTest() {
 
   // ─── UPLOAD (XHR Progress Tracking to Saturation) ──────────────────────
   const measureUpload = async (): Promise<number> => {
-    const PARALLEL = 5
+    const PARALLEL = 4
     const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 3 * 1024 * 1024  // 3MB per POST chunk (well under Vercel Edge limit)
+    const CHUNK_SIZE = 1 * 1024 * 1024  // 1MB per POST chunk (extremely stable on serverless WAF)
 
     let totalUploadedBytes = 0
     const activeStreams: { xhr: XMLHttpRequest; uploaded: number }[] = []
@@ -249,7 +249,14 @@ export function RealSpeedTest() {
     finished = true
     clearInterval(interval)
 
-    // Abort active uploads
+    const elapsed = (performance.now() - startTime) / 1000
+    if (elapsed < 0.5) return 0
+
+    // Capture the final uploaded bytes BEFORE we abort the XHRs
+    const finalProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
+    const finalTotal = totalUploadedBytes + finalProgressBytes
+
+    // Clean up active requests now that measurements are saved
     activeStreams.forEach(s => {
       if (s && s.xhr) {
         try { s.xhr.abort() } catch (_) {}
@@ -257,11 +264,6 @@ export function RealSpeedTest() {
     })
     activeXHRsRef.current = []
 
-    const elapsed = (performance.now() - startTime) / 1000
-    if (elapsed < 0.5) return 0
-
-    const finalProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
-    const finalTotal = totalUploadedBytes + finalProgressBytes
     const rawFinalMbps = (finalTotal * 8) / (elapsed * 1_000_000)
     return Math.round((rawFinalMbps * CALIBRATION.upload) * 100) / 100
   }
