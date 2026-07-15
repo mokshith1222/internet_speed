@@ -157,11 +157,10 @@ export function RealSpeedTest() {
     return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 10) / 10
   }
 
-  // ─── UPLOAD ────────────────────────────────────────────────────────────
   const measureUpload = async (): Promise<number> => {
-    const PARALLEL = 4
+    const PARALLEL = 5
     const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 256 * 1024  // 256KB per POST
+    const CHUNK_SIZE = 1024 * 1024  // 1MB per POST
 
     let totalBytes = 0
     const startTime = performance.now()
