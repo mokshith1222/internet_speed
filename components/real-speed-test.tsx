@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { Play, AlertCircle, Activity, Gauge as GaugeIcon } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Play, Activity, Gauge as GaugeIcon, AlertCircle } from 'lucide-react'
 
 interface SpeedResults {
   download: number
@@ -19,6 +19,17 @@ export function RealSpeedTest() {
   const [phase, setPhase] = useState<'idle' | 'ping' | 'download' | 'upload'>('idle')
   const [error, setError] = useState('')
   const [viewMode, setViewMode] = useState<'digital' | 'analog'>('analog')
+
+  // Ref to track component unmount and abort fetch requests
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   const getSpeedColor = (speed: number, type: 'download' | 'upload') => {
     if (type === 'download') {
@@ -48,30 +59,30 @@ export function RealSpeedTest() {
     const iterations = 10
 
     for (let i = 0; i < iterations; i++) {
+      if (abortControllerRef.current?.signal.aborted) break
+      
       const start = performance.now()
       try {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 10000)
+        const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 5000)
         const response = await fetch('/api/ping', {
           cache: 'no-store',
-          signal: controller.signal,
+          signal: abortControllerRef.current?.signal,
         })
-        clearTimeout(timeout)
+        clearTimeout(timeoutId)
+        
         if (response.ok) {
           const end = performance.now()
           const pingTime = Math.max(1, end - start)
           pings.push(pingTime)
-          setLiveSpeed(pingTime) // Show ping on live speed temporarily
+          setLiveSpeed(Math.round(pingTime))
         }
       } catch (err) {
-        // Continue with next ping
+        // Silently continue
       }
-      setProgress(prev => Math.min(prev + 1.5, 12))
+      setProgress(prev => Math.min(prev + 1.5, 15))
     }
 
-    if (pings.length === 0) {
-      return { ping: 0, jitter: 0 }
-    }
+    if (pings.length === 0) return { ping: 0, jitter: 0 }
 
     const avgPing = pings.reduce((a, b) => a + b, 0) / pings.length
     const jitter = pings.length > 1
@@ -84,42 +95,47 @@ export function RealSpeedTest() {
   const measureDownload = async () => {
     try {
       const testSizes = [1048576, 2097152, 5242880] // 1MB, 2MB, 5MB
-      const speeds: number[] = []
+      let totalSpeed = 0
+      let validTests = 0
 
       for (const size of testSizes) {
+        if (abortControllerRef.current?.signal.aborted) break
+
         const start = performance.now()
         try {
-          const controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), 45000)
+          const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000)
           const response = await fetch(`/api/download?size=${size}`, {
             cache: 'no-store',
-            signal: controller.signal,
+            signal: abortControllerRef.current?.signal,
           })
-          clearTimeout(timeout)
+          clearTimeout(timeoutId)
 
           if (response.ok) {
             const ttfb = performance.now()
             await response.blob()
             const end = performance.now()
-            const timeSec = Math.max(0.01, (end - ttfb) / 1000)
+            
+            // Subtract TTFB to get raw throughput time
+            let timeSec = (end - ttfb) / 1000
+            if (timeSec < 0.001) timeSec = 0.01 // Prevent division by zero
+            
             const sizeMb = size / (1024 * 1024)
             const speedMbps = (sizeMb / timeSec) * 8
-            const recordedSpeed = Math.max(0.1, speedMbps)
-            speeds.push(recordedSpeed)
-            setLiveSpeed(recordedSpeed)
+            
+            if (!isNaN(speedMbps) && speedMbps > 0 && speedMbps < 10000) {
+              totalSpeed += speedMbps
+              validTests++
+              setLiveSpeed(Math.round(speedMbps * 10) / 10)
+            }
           }
         } catch (err) {
-          // Continue with next size
+          // Silently continue
         }
-        setProgress(prev => Math.min(prev + 15, 50))
+        setProgress(prev => Math.min(prev + 15, 55))
       }
 
-      if (speeds.length === 0) {
-        return 0
-      }
-
-      const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length
-      return Math.round(avgSpeed * 10) / 10
+      if (validTests === 0) return 0
+      return Math.round((totalSpeed / validTests) * 10) / 10
     } catch (err) {
       return 0
     }
@@ -127,54 +143,61 @@ export function RealSpeedTest() {
 
   const measureUpload = async () => {
     try {
-      const testSizes = [524288, 1048576, 2097152] // 512KB, 1MB, 2MB
-      const speeds: number[] = []
+      const testSizes = [131072, 262144, 524288] // 128KB, 256KB, 512KB
+      let totalSpeed = 0
+      let validTests = 0
 
       for (const size of testSizes) {
+        if (abortControllerRef.current?.signal.aborted) break
+
         const data = new Uint8Array(size)
         if (typeof crypto !== 'undefined') {
-          crypto.getRandomValues(data)
+          for (let i = 0; i < data.length; i += 65536) {
+            crypto.getRandomValues(data.subarray(i, Math.min(i + 65536, data.length)))
+          }
         }
 
         const start = performance.now()
         try {
-          const controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), 45000)
+          const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000)
           const response = await fetch('/api/upload', {
             method: 'POST',
             body: data,
             cache: 'no-store',
-            signal: controller.signal,
+            signal: abortControllerRef.current?.signal,
           })
-          clearTimeout(timeout)
+          clearTimeout(timeoutId)
 
           if (response.ok) {
             const end = performance.now()
-            const timeSec = Math.max(0.01, (end - start) / 1000)
+            let timeSec = (end - start) / 1000
+            if (timeSec < 0.001) timeSec = 0.01
+
             const sizeMb = size / (1024 * 1024)
             const speedMbps = (sizeMb / timeSec) * 8
-            const recordedSpeed = Math.max(0.1, speedMbps)
-            speeds.push(recordedSpeed)
-            setLiveSpeed(recordedSpeed)
+            
+            if (!isNaN(speedMbps) && speedMbps > 0 && speedMbps < 10000) {
+              totalSpeed += speedMbps
+              validTests++
+              setLiveSpeed(Math.round(speedMbps * 10) / 10)
+            }
           }
         } catch (err) {
-          // Continue with next size
+          // Silently continue
         }
-        setProgress(prev => Math.min(prev + 15, 85))
+        setProgress(prev => Math.min(prev + 15, 95))
       }
 
-      if (speeds.length === 0) {
-        return 0
-      }
-
-      const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length
-      return Math.round(avgSpeed * 10) / 10
+      if (validTests === 0) return 0
+      return Math.round((totalSpeed / validTests) * 10) / 10
     } catch (err) {
       return 0
     }
   }
 
   const runSpeedTest = async () => {
+    // Reset state
+    abortControllerRef.current = new AbortController()
     setIsRunning(true)
     setProgress(0)
     setLiveSpeed(0)
@@ -184,67 +207,70 @@ export function RealSpeedTest() {
     try {
       setPhase('ping')
       const pingResults = await measurePing()
+      if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       setPhase('download')
       const download = await measureDownload()
+      if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       setPhase('upload')
       const upload = await measureUpload()
+      if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       if (download === 0 && upload === 0 && pingResults.ping === 0) {
-        setError('Unable to complete speed test. Please check your internet connection and try again.')
-        setIsRunning(false)
-        setPhase('idle')
-        setLiveSpeed(0)
-        return
+        setError('Network Error: Unable to reach the testing servers. Please try again.')
+      } else {
+        setResults({
+          download,
+          upload,
+          ping: pingResults.ping,
+          jitter: pingResults.jitter,
+          timestamp: new Date().toLocaleString(),
+        })
       }
-
-      const finalResults: SpeedResults = {
-        download: download || 0,
-        upload: upload || 0,
-        ping: pingResults.ping || 0,
-        jitter: pingResults.jitter || 0,
-        timestamp: new Date().toLocaleString(),
-      }
-
-      setResults(finalResults)
-      setProgress(100)
     } catch (err) {
-      setError('Speed test encountered an error. Please try again.')
+      if ((err as Error).message !== 'Aborted') {
+        setError('An unexpected error occurred during the test.')
+      }
     } finally {
       setIsRunning(false)
       setPhase('idle')
       setLiveSpeed(0)
+      setProgress(100)
     }
   }
 
-  // Convert speed to angle for analog meter (-120deg to 120deg)
-  const speedToAngle = (speed: number) => {
-    if (speed === 0 || phase === 'idle') return -120
-    const maxSpeed = 1000 // Scale up to 1000 Mbps
+  // Smooth analog gauge calculation mapping 0-1000 Mbps to a -90 to +90 degree angle.
+  const calculateNeedleAngle = (speed: number) => {
+    if (speed <= 0 || phase === 'idle') return -90
+    const maxSpeed = 1000 
     const logSpeed = Math.log10(speed + 1)
     const logMax = Math.log10(maxSpeed + 1)
-    const ratio = Math.min(1, logSpeed / logMax)
-    return -120 + (ratio * 240)
+    let ratio = logSpeed / logMax
+    if (ratio > 1) ratio = 1
+    return -90 + (ratio * 180) // 180 degree semi-circle
   }
 
+  const needleAngle = calculateNeedleAngle(liveSpeed)
+
   return (
-    <div className="w-full max-w-4xl mx-auto px-2 sm:px-4">
+    <div className="w-full max-w-3xl mx-auto my-12 px-4">
+      
       {/* View Mode Toggle */}
-      <div className="flex justify-center mb-8">
-        <div className="bg-secondary/20 p-1 rounded-full inline-flex border border-border">
+      <div className="flex justify-center mb-10">
+        <div className="bg-secondary/40 p-1.5 rounded-full inline-flex border border-border shadow-sm">
           <button
             onClick={() => setViewMode('analog')}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
-              viewMode === 'analog' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground hover:text-foreground'
+            className={`px-6 py-2.5 rounded-full text-sm font-semibold transition-all flex items-center gap-2 ${
+              viewMode === 'analog' ? 'bg-primary text-primary-foreground shadow-md scale-105' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             <GaugeIcon className="w-4 h-4" /> Analog
           </button>
           <button
             onClick={() => setViewMode('digital')}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
-              viewMode === 'digital' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground hover:text-foreground'
+            className={`px-6 py-2.5 rounded-full text-sm font-semibold transition-all flex items-center gap-2 ${
+              viewMode === 'digital' ? 'bg-primary text-primary-foreground shadow-md scale-105' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             <Activity className="w-4 h-4" /> Digital
@@ -252,178 +278,145 @@ export function RealSpeedTest() {
         </div>
       </div>
 
-      {!results ? (
-        <div className="flex flex-col items-center gap-6 py-6 sm:py-12">
-          
-          {/* Main Visual Component */}
-          {viewMode === 'digital' ? (
-            // Digital View
-            <div className="relative w-48 h-48 sm:w-56 sm:h-56 flex items-center justify-center">
-              {isRunning && (
-                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 200 200">
-                  <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="2" className="text-muted/30" />
-                  <circle
-                    cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="8"
-                    strokeDasharray={`${(progress / 100) * 565.5} 565.5`}
-                    strokeLinecap="round"
-                    className="text-primary transition-all duration-300"
-                    style={{ transform: 'rotate(-90deg)', transformOrigin: '100px 100px' }}
-                  />
-                </svg>
-              )}
-              <div className="relative z-10 flex flex-col items-center gap-2">
-                <div className="text-4xl sm:text-6xl font-bold text-foreground transition-all">
-                  {isRunning ? Math.round(liveSpeed) : '0'}
-                </div>
-                <div className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-                  {phase === 'idle' ? 'Ready' : (phase === 'ping' ? 'Ping (ms)' : 'Mbps')}
-                </div>
-              </div>
-            </div>
-          ) : (
-            // Analog View
-            <div className="relative w-64 h-40 sm:w-80 sm:h-48 overflow-hidden flex flex-col items-center justify-end pb-4">
-              <svg className="absolute inset-0 w-full h-full drop-shadow-xl" viewBox="0 0 200 120">
-                {/* Gauge Background Track */}
-                <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="currentColor" strokeWidth="12" className="text-muted/30" strokeLinecap="round" />
-                {/* Gauge Active Track (animated based on progress when running) */}
+      <div className="flex flex-col items-center">
+        {/* Visual Gauge */}
+        <div className="mb-12 w-full flex justify-center">
+          {viewMode === 'analog' ? (
+            <div className="relative w-64 h-32 sm:w-80 sm:h-40 overflow-hidden">
+              <svg className="absolute inset-0 w-full h-full drop-shadow-2xl" viewBox="0 0 200 100">
+                {/* Background Track */}
+                <path d="M 10 90 A 80 80 0 0 1 190 90" fill="none" stroke="currentColor" strokeWidth="16" className="text-muted/20" strokeLinecap="round" />
+                
+                {/* Active Track */}
                 {isRunning && (
                   <path 
-                    d="M 20 100 A 80 80 0 0 1 180 100" 
+                    d="M 10 90 A 80 80 0 0 1 190 90" 
                     fill="none" 
-                    stroke="url(#gradient)" 
-                    strokeWidth="12" 
+                    stroke="url(#speedGradient)" 
+                    strokeWidth="16" 
                     strokeLinecap="round"
                     strokeDasharray="251.2"
                     strokeDashoffset={251.2 - (progress / 100) * 251.2}
-                    className="transition-all duration-300"
+                    className="transition-all duration-300 ease-out"
                   />
                 )}
                 
                 <defs>
-                  <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <linearGradient id="speedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
                     <stop offset="0%" stopColor="#3b82f6" />
                     <stop offset="50%" stopColor="#8b5cf6" />
                     <stop offset="100%" stopColor="#ef4444" />
                   </linearGradient>
                 </defs>
 
-                {/* Markings */}
-                <text x="20" y="115" fontSize="8" fill="currentColor" className="text-muted-foreground" textAnchor="middle">0</text>
-                <text x="60" y="45" fontSize="8" fill="currentColor" className="text-muted-foreground" textAnchor="middle">10</text>
-                <text x="100" y="15" fontSize="8" fill="currentColor" className="text-muted-foreground" textAnchor="middle">100</text>
-                <text x="140" y="45" fontSize="8" fill="currentColor" className="text-muted-foreground" textAnchor="middle">500</text>
-                <text x="180" y="115" fontSize="8" fill="currentColor" className="text-muted-foreground" textAnchor="middle">1K</text>
+                {/* Markers */}
+                <text x="10" y="98" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="start">0</text>
+                <text x="50" y="30" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">10</text>
+                <text x="100" y="8" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">100</text>
+                <text x="150" y="30" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">500</text>
+                <text x="190" y="98" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="end">1000+</text>
 
                 {/* Needle */}
-                <g 
-                  style={{ transform: `rotate(${speedToAngle(liveSpeed)}deg)`, transformOrigin: '100px 100px', transition: 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)' }}
-                >
-                  <path d="M 96 100 L 100 20 L 104 100 Z" fill="currentColor" className="text-foreground drop-shadow-md" />
-                  <circle cx="100" cy="100" r="6" fill="currentColor" className="text-primary" />
+                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 90px', transition: 'transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)' }}>
+                  <path d="M 96 90 L 100 15 L 104 90 Z" fill="currentColor" className="text-foreground drop-shadow-lg" />
+                  <circle cx="100" cy="90" r="8" fill="currentColor" className="text-primary shadow-lg" />
                 </g>
               </svg>
-
-              <div className="relative z-10 flex flex-col items-center mt-2">
-                <div className="text-3xl font-bold text-foreground">
-                  {isRunning ? Math.round(liveSpeed) : '0'}
+            </div>
+          ) : (
+            <div className="relative w-56 h-56 flex items-center justify-center">
+              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 200 200">
+                <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="8" className="text-muted/20" />
+                {isRunning && (
+                  <circle
+                    cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="8"
+                    strokeDasharray={`${(progress / 100) * 565.5} 565.5`}
+                    strokeLinecap="round"
+                    className="text-primary transition-all duration-300 ease-out"
+                    style={{ transform: 'rotate(-90deg)', transformOrigin: '100px 100px' }}
+                  />
+                )}
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center pt-2">
+                <div className="text-6xl font-black text-foreground tabular-nums tracking-tight transition-all">
+                  {isRunning ? liveSpeed : '0'}
                 </div>
-                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  {phase === 'idle' ? 'Mbps' : (phase === 'ping' ? 'Ping (ms)' : 'Mbps')}
+                <div className="text-sm font-bold text-muted-foreground uppercase tracking-widest mt-1">
+                  {phase === 'idle' ? 'Ready' : (phase === 'ping' ? 'ms' : 'Mbps')}
                 </div>
               </div>
             </div>
           )}
+        </div>
 
-          <div className="text-center mt-4">
-            <h1 className="text-3xl sm:text-4xl font-bold text-foreground">Speed Test</h1>
-            <p className="text-base sm:text-lg text-muted-foreground">
-              {isRunning ? `Measuring ${phase}...` : 'Click to test your real internet speed now'}
-            </p>
-          </div>
-
-          {error && (
-            <div className="w-full flex items-center gap-3 p-4 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive">
-              <AlertCircle className="w-5 h-5 flex-shrink-0" />
-              <span className="text-sm">{error}</span>
+        {/* Phase Indicator */}
+        <div className="h-8 mb-6">
+          {isRunning && (
+            <div className="text-lg font-semibold text-primary uppercase tracking-widest animate-pulse">
+              Measuring {phase}...
             </div>
           )}
+          {!isRunning && !results && !error && (
+            <div className="text-lg font-medium text-muted-foreground">
+              Click Start to Begin
+            </div>
+          )}
+        </div>
 
+        {error && (
+          <div className="mb-8 w-full max-w-md flex items-center gap-3 p-4 bg-destructive/10 border border-destructive/20 rounded-xl text-destructive font-medium">
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            <span className="text-sm">{error}</span>
+          </div>
+        )}
+
+        {/* Action Button */}
+        {!isRunning && !results ? (
           <button
             onClick={runSpeedTest}
-            disabled={isRunning}
-            className="relative mt-2 inline-flex items-center justify-center w-24 h-24 sm:w-32 sm:h-32 rounded-full bg-gradient-to-br from-primary to-orange-600 hover:from-primary/90 hover:to-orange-700 disabled:from-muted disabled:to-muted-foreground text-white shadow-xl hover:shadow-2xl transition-all transform hover:scale-105 active:scale-95 disabled:opacity-75 disabled:scale-100"
+            className="group relative inline-flex items-center justify-center w-32 h-32 rounded-full bg-primary hover:bg-primary/90 text-primary-foreground shadow-2xl transition-all hover:scale-105 active:scale-95"
           >
-            <Play className="w-10 h-10 sm:w-12 sm:h-12 fill-current" />
+            <Play className="w-12 h-12 ml-2 fill-current group-hover:scale-110 transition-transform" />
+            <div className="absolute inset-0 rounded-full border-4 border-primary/30 scale-110 group-hover:scale-125 transition-transform duration-500 opacity-50" />
           </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-6 sm:gap-8 py-8 sm:py-12">
-          {/* Results Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-            {/* Download */}
-            <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border border-blue-500/20 dark:border-blue-500/30 rounded-2xl p-4 sm:p-6 text-center shadow-sm">
-              <div className="text-xs sm:text-sm font-semibold text-muted-foreground mb-1 sm:mb-2 uppercase tracking-wider">
-                Download
+        ) : (
+          results && (
+            <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
+                  <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Download</div>
+                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.download, 'download')}`}>{results.download.toFixed(1)}</div>
+                  <div className="text-xs text-muted-foreground font-semibold">Mbps</div>
+                </div>
+                <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
+                  <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Upload</div>
+                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.upload, 'upload')}`}>{results.upload.toFixed(1)}</div>
+                  <div className="text-xs text-muted-foreground font-semibold">Mbps</div>
+                </div>
+                <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
+                  <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Ping</div>
+                  <div className={`text-4xl font-black mb-1 tabular-nums ${getPingColor(results.ping)}`}>{results.ping.toFixed(1)}</div>
+                  <div className="text-xs text-muted-foreground font-semibold">ms</div>
+                </div>
+                <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
+                  <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Jitter</div>
+                  <div className="text-4xl font-black mb-1 tabular-nums text-amber-500">{results.jitter.toFixed(1)}</div>
+                  <div className="text-xs text-muted-foreground font-semibold">ms</div>
+                </div>
               </div>
-              <div className={`text-3xl sm:text-4xl font-bold mb-1 ${getSpeedColor(results.download, 'download')}`}>
-                {results.download.toFixed(1)}
+              <div className="flex justify-center">
+                <button
+                  onClick={runSpeedTest}
+                  className="py-3 px-8 bg-secondary hover:bg-secondary/80 text-secondary-foreground font-bold rounded-full transition-all hover:scale-105 active:scale-95 flex items-center gap-2"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  Test Again
+                </button>
               </div>
-              <div className="text-[10px] sm:text-xs text-muted-foreground font-medium">Mbps</div>
             </div>
-
-            {/* Upload */}
-            <div className="bg-gradient-to-br from-purple-500/10 to-purple-600/10 border border-purple-500/20 dark:border-purple-500/30 rounded-2xl p-4 sm:p-6 text-center shadow-sm">
-              <div className="text-xs sm:text-sm font-semibold text-muted-foreground mb-1 sm:mb-2 uppercase tracking-wider">
-                Upload
-              </div>
-              <div className={`text-3xl sm:text-4xl font-bold mb-1 ${getSpeedColor(results.upload, 'upload')}`}>
-                {results.upload.toFixed(1)}
-              </div>
-              <div className="text-[10px] sm:text-xs text-muted-foreground font-medium">Mbps</div>
-            </div>
-
-            {/* Ping */}
-            <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border border-emerald-500/20 dark:border-emerald-500/30 rounded-2xl p-4 sm:p-6 text-center shadow-sm">
-              <div className="text-xs sm:text-sm font-semibold text-muted-foreground mb-1 sm:mb-2 uppercase tracking-wider">
-                Ping
-              </div>
-              <div className={`text-3xl sm:text-4xl font-bold mb-1 ${getPingColor(results.ping)}`}>
-                {results.ping.toFixed(1)}
-              </div>
-              <div className="text-[10px] sm:text-xs text-muted-foreground font-medium">ms</div>
-            </div>
-
-            {/* Jitter */}
-            <div className="bg-gradient-to-br from-amber-500/10 to-amber-600/10 border border-amber-500/20 dark:border-amber-500/30 rounded-2xl p-4 sm:p-6 text-center shadow-sm">
-              <div className="text-xs sm:text-sm font-semibold text-muted-foreground mb-1 sm:mb-2 uppercase tracking-wider">
-                Jitter
-              </div>
-              <div className="text-3xl sm:text-4xl font-bold mb-1 text-amber-500">
-                {results.jitter.toFixed(1)}
-              </div>
-              <div className="text-[10px] sm:text-xs text-muted-foreground font-medium">ms</div>
-            </div>
-          </div>
-
-          <div className="text-center text-xs sm:text-sm text-muted-foreground">
-            Test completed at: {results.timestamp}
-          </div>
-
-          <button
-            onClick={() => {
-              setResults(null)
-              setProgress(0)
-              setLiveSpeed(0)
-              runSpeedTest()
-            }}
-            className="w-full py-4 px-6 bg-gradient-to-r from-primary to-orange-600 hover:from-primary/90 hover:to-orange-700 text-white font-bold rounded-xl transition-all transform hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 shadow-lg mt-2"
-          >
-            <Play className="w-5 h-5 fill-current" />
-            Run Another Test
-          </button>
-        </div>
-      )}
+          )
+        )}
+      </div>
     </div>
   )
 }
