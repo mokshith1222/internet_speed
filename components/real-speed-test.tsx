@@ -175,12 +175,14 @@ export function RealSpeedTest() {
   // ─── UPLOAD (XHR Progress Tracking to Saturation) ──────────────────────
   const measureUpload = async (): Promise<number> => {
     const PARALLEL = 2
-    const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 3.5 * 1024 * 1024  // 3.5MB per POST chunk (minimizes HTTP handshake overhead, well under 4.5MB Vercel limit)
+    const DURATION_MS = 9500  // 9.5 seconds total (1.5s warm-up + 8s measurement)
+    const WARMUP_MS = 1500    // 1.5s warm-up to stabilize TCP socket buffers
+    const CHUNK_SIZE = 3.5 * 1024 * 1024  // 3.5MB per POST chunk
 
     let totalUploadedBytes = 0
+    let measurementStartTime = 0
     const activeStreams: { xhr: XMLHttpRequest; uploaded: number }[] = []
-    const startTime = performance.now()
+    const testStartTime = performance.now()
     let finished = false
 
     // Pre-generate random chunk data
@@ -202,14 +204,20 @@ export function RealSpeedTest() {
       xhr.upload.onprogress = (e) => {
         if (finished) return
         if (e.lengthComputable) {
-          streamInfo.uploaded = e.loaded
+          // Only track bytes sent after the warm-up phase has ended
+          if (performance.now() - testStartTime > WARMUP_MS) {
+            streamInfo.uploaded = e.loaded
+          }
         }
       }
 
       xhr.onload = () => {
         if (finished) return
         if (xhr.status === 200) {
-          totalUploadedBytes += CHUNK_SIZE
+          // Only count completed chunks after the warm-up phase has ended
+          if (performance.now() - testStartTime > WARMUP_MS) {
+            totalUploadedBytes += CHUNK_SIZE
+          }
         }
         streamInfo.uploaded = 0
         // Clean up from global abort array
@@ -234,13 +242,24 @@ export function RealSpeedTest() {
     }
 
     const interval = setInterval(() => {
-      const elapsed = (performance.now() - startTime) / 1000
-      if (elapsed > 0.3) {
-        const currentProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
-        const total = totalUploadedBytes + currentProgressBytes
-        const rawMbps = (total * 8) / (elapsed * 1_000_000)
-        const calibratedMbps = rawMbps * CALIBRATION.upload
-        setLiveSpeed(Math.round(calibratedMbps * 100) / 100)
+      const now = performance.now()
+      const elapsedTotal = now - testStartTime
+
+      if (elapsedTotal > WARMUP_MS) {
+        if (measurementStartTime === 0) {
+          measurementStartTime = now
+        }
+        const elapsedMeasurement = (now - measurementStartTime) / 1000
+        if (elapsedMeasurement > 0.2) {
+          const currentProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
+          const total = totalUploadedBytes + currentProgressBytes
+          const rawMbps = (total * 8) / (elapsedMeasurement * 1_000_000)
+          const calibratedMbps = rawMbps * CALIBRATION.upload
+          setLiveSpeed(Math.round(calibratedMbps * 100) / 100)
+        }
+      } else {
+        // Hold at 0 during warm-up phase while socket buffers fill
+        setLiveSpeed(0)
       }
       setProgress(prev => Math.min(prev + 1.2, 95))
     }, 200)
@@ -249,8 +268,8 @@ export function RealSpeedTest() {
     finished = true
     clearInterval(interval)
 
-    const elapsed = (performance.now() - startTime) / 1000
-    if (elapsed < 0.5) return 0
+    const finalElapsed = (performance.now() - measurementStartTime) / 1000
+    if (finalElapsed < 0.5) return 0
 
     // Capture the final uploaded bytes BEFORE we abort the XHRs
     const finalProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
@@ -264,7 +283,7 @@ export function RealSpeedTest() {
     })
     activeXHRsRef.current = []
 
-    const rawFinalMbps = (finalTotal * 8) / (elapsed * 1_000_000)
+    const rawFinalMbps = (finalTotal * 8) / (finalElapsed * 1_000_000)
     return Math.round((rawFinalMbps * CALIBRATION.upload) * 100) / 100
   }
 
