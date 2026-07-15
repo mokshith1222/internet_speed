@@ -2,14 +2,8 @@ export const runtime = 'edge'
 
 export async function POST(request: Request) {
   try {
-    // Consume the request stream fully to measure upload throughput
-    if (request.body) {
-      const reader = request.body.getReader()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-      }
-    }
+    // Consume the request body natively in C++ (uses 0ms JS CPU time, avoiding Vercel's 50ms Edge timeout)
+    await request.arrayBuffer()
     
     return new Response(
       JSON.stringify({ success: true }),

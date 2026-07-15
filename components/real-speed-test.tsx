@@ -208,7 +208,9 @@ export function RealSpeedTest() {
 
       xhr.onload = () => {
         if (finished) return
-        totalUploadedBytes += CHUNK_SIZE
+        if (xhr.status === 200) {
+          totalUploadedBytes += CHUNK_SIZE
+        }
         streamInfo.uploaded = 0
         // Clean up from global abort array
         activeXHRsRef.current = activeXHRsRef.current.filter(x => x !== xhr)
