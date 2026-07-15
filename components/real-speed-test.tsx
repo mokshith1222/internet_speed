@@ -174,10 +174,10 @@ export function RealSpeedTest() {
 
   // ─── UPLOAD (XHR Progress Tracking to Saturation) ──────────────────────
   const measureUpload = async (): Promise<number> => {
-    const PARALLEL = 2
+    const PARALLEL = 3
     const DURATION_MS = 9500  // 9.5 seconds total (1.5s warm-up + 8s measurement)
     const WARMUP_MS = 1500    // 1.5s warm-up to stabilize TCP socket buffers
-    const CHUNK_SIZE = 3.5 * 1024 * 1024  // 3.5MB per POST chunk
+    const CHUNK_SIZE = 1 * 1024 * 1024  // 1MB per POST chunk (completely safe from Vercel limits)
 
     let totalUploadedBytes = 0
     let measurementStartTime = 0
