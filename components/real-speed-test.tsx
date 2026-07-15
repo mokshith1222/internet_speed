@@ -18,7 +18,7 @@ export function RealSpeedTest() {
   const [results, setResults] = useState<SpeedResults | null>(null)
   const [phase, setPhase] = useState<'idle' | 'ping' | 'download' | 'upload'>('idle')
   const [error, setError] = useState('')
-  const [viewMode, setViewMode] = useState<'digital' | 'analog'>('analog')
+  const [viewMode, setViewMode] = useState<'analog' | 'digital'>('analog')
 
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -28,25 +28,25 @@ export function RealSpeedTest() {
 
   const getSpeedColor = (speed: number, type: 'download' | 'upload') => {
     if (type === 'download') {
-      if (speed >= 100) return 'text-green-500'
-      if (speed >= 50) return 'text-emerald-500'
-      if (speed >= 25) return 'text-yellow-500'
-      if (speed >= 10) return 'text-orange-500'
-      return 'text-red-500'
+      if (speed >= 100) return 'text-cyan-400'
+      if (speed >= 50) return 'text-emerald-400'
+      if (speed >= 25) return 'text-yellow-400'
+      if (speed >= 10) return 'text-orange-400'
+      return 'text-red-400'
     } else {
-      if (speed >= 20) return 'text-green-500'
-      if (speed >= 10) return 'text-emerald-500'
-      if (speed >= 5) return 'text-yellow-500'
-      if (speed >= 1) return 'text-orange-500'
-      return 'text-red-500'
+      if (speed >= 20) return 'text-cyan-400'
+      if (speed >= 10) return 'text-emerald-400'
+      if (speed >= 5) return 'text-yellow-400'
+      if (speed >= 1) return 'text-orange-400'
+      return 'text-red-400'
     }
   }
 
   const getPingColor = (ping: number) => {
-    if (ping < 20) return 'text-green-500'
-    if (ping < 50) return 'text-emerald-500'
-    if (ping < 100) return 'text-yellow-500'
-    return 'text-red-500'
+    if (ping < 20) return 'text-cyan-400'
+    if (ping < 50) return 'text-emerald-400'
+    if (ping < 100) return 'text-yellow-400'
+    return 'text-red-400'
   }
 
   // ─── PING ──────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ export function RealSpeedTest() {
     const pings: number[] = []
     const signal = abortControllerRef.current?.signal
 
-    // Warm-up request to establish TCP + TLS connection
+    // Warm-up request to establish connection
     try {
       await fetch(`/api/ping?_=${Date.now()}`, { cache: 'no-store', signal })
     } catch (_) {}
@@ -97,8 +97,8 @@ export function RealSpeedTest() {
   // ─── DOWNLOAD ──────────────────────────────────────────────────────────
   const measureDownload = async (): Promise<number> => {
     const PARALLEL = 6
-    const DURATION_MS = 10000  // 10 seconds for stable average
-    const CHUNK_BYTES = 5_000_000  // 5MB per request (optimized for edge functions)
+    const DURATION_MS = 10000  // 10 seconds
+    const CHUNK_BYTES = 10_000_000  // 10MB chunks to minimize handshake latency overhead
 
     let totalBytes = 0
     let startTime = 0
@@ -141,7 +141,7 @@ export function RealSpeedTest() {
         const elapsed = (performance.now() - startTime) / 1000
         if (elapsed > 0.3) {
           const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
-          setLiveSpeed(Math.round(mbps * 10) / 10)
+          setLiveSpeed(Math.round(mbps * 100) / 100)
         }
       }
       setProgress(prev => Math.min(prev + 1.2, 58))
@@ -154,9 +154,10 @@ export function RealSpeedTest() {
 
     const elapsed = (performance.now() - startTime) / 1000
     if (elapsed < 0.5 || totalBytes === 0) return 0
-    return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 10) / 10
+    return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 100) / 100
   }
 
+  // ─── UPLOAD ────────────────────────────────────────────────────────────
   const measureUpload = async (): Promise<number> => {
     const PARALLEL = 5
     const DURATION_MS = 8000  // 8 seconds
@@ -201,7 +202,7 @@ export function RealSpeedTest() {
       const elapsed = (performance.now() - startTime) / 1000
       if (elapsed > 0.3) {
         const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
-        setLiveSpeed(Math.round(mbps * 10) / 10)
+        setLiveSpeed(Math.round(mbps * 100) / 100)
       }
       setProgress(prev => Math.min(prev + 1.2, 95))
     }, 200)
@@ -213,10 +214,10 @@ export function RealSpeedTest() {
 
     const elapsed = (performance.now() - startTime) / 1000
     if (elapsed < 0.5 || totalBytes === 0) return 0
-    return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 10) / 10
+    return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 100) / 100
   }
 
-  // ─── MAIN TEST RUNNER ──────────────────────────────────────────────────
+  // ─── MAIN RUNNER ───────────────────────────────────────────────────────
   const runSpeedTest = async () => {
     abortControllerRef.current = new AbortController()
     setIsRunning(true)
@@ -265,18 +266,41 @@ export function RealSpeedTest() {
     }
   }
 
+  // ─── OOKLA SPEEDOMETER REDESIGN ────────────────────────────────────────
+  // Calculate logarithmic progress along the 270 degree sweep
   const calculateNeedleAngle = (speed: number) => {
     let currentSpeed = speed
     if (!isRunning && results) {
       currentSpeed = results.download
     }
-    if (currentSpeed <= 0 || (isRunning && phase === 'ping')) return -90
+    if (currentSpeed <= 0 || (isRunning && phase === 'ping')) return 225 // Bottom-left starting point
+
+    // Logarithmic ratio mapping speeds from 0 to 1000 Mbps
     const logSpeed = Math.log10(Math.max(currentSpeed, 0.1) + 1)
     const logMax = Math.log10(1001)
-    return -90 + Math.min(logSpeed / logMax, 1) * 180
+    const ratio = Math.min(logSpeed / logMax, 1)
+
+    // Sweeps clockwise from 225 degrees to 495 degrees (which is equivalent to 135 degrees)
+    return 225 + ratio * 270
   }
 
   const needleAngle = calculateNeedleAngle(liveSpeed)
+
+  // Mathematically plot markers dynamically inside the 270 degree arc
+  const labels = [
+    { value: '0', angle: 135 },
+    { value: '5', angle: 168.75 },
+    { value: '10', angle: 202.5 },
+    { value: '50', angle: 236.25 },
+    { value: '100', angle: 270 },
+    { value: '250', angle: 303.75 },
+    { value: '500', angle: 337.5 },
+    { value: '750', angle: 371.25 },
+    { value: '1K', angle: 405 },
+  ]
+
+  const rLabels = 60 // Radius placement for speed labels
+  const strokeDash = 353.43 // Arc length for radius 75 circle (270 degrees sweep)
 
   return (
     <div className="w-full max-w-3xl mx-auto my-12 px-4">
@@ -307,46 +331,82 @@ export function RealSpeedTest() {
         {/* Visual Gauge */}
         <div className="mb-12 w-full flex justify-center">
           {viewMode === 'analog' ? (
-            <div className="relative w-64 h-36 sm:w-80 sm:h-44 overflow-hidden">
-              <svg className="absolute inset-0 w-full h-full drop-shadow-2xl" viewBox="0 0 200 105">
-                {/* Background arc */}
-                <path d="M 15 95 A 85 85 0 0 1 185 95" fill="none" stroke="currentColor" strokeWidth="14" className="text-muted/20" strokeLinecap="round" />
+            <div className="relative w-72 h-72 sm:w-80 sm:h-80">
+              <svg className="absolute inset-0 w-full h-full drop-shadow-2xl" viewBox="0 0 200 200">
+                {/* Background Arc (270 degrees sweep) */}
+                <path
+                  d="M 46.97 153.03 A 75 75 0 1 1 153.03 153.03"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="8"
+                  className="text-muted/10"
+                  strokeLinecap="round"
+                />
+
+                {/* Active Colored Arc (Progress) */}
                 {isRunning && (
                   <path
-                    d="M 15 95 A 85 85 0 0 1 185 95"
+                    d="M 46.97 153.03 A 75 75 0 1 1 153.03 153.03"
                     fill="none"
-                    stroke="url(#speedGradient)"
-                    strokeWidth="14"
+                    stroke="url(#ooklaGradient)"
+                    strokeWidth="8"
                     strokeLinecap="round"
-                    strokeDasharray="266.9"
-                    strokeDashoffset={266.9 - (progress / 100) * 266.9}
+                    strokeDasharray={strokeDash}
+                    strokeDashoffset={strokeDash - (progress / 100) * strokeDash}
                     className="transition-all duration-300 ease-out"
                   />
                 )}
+
                 <defs>
-                  <linearGradient id="speedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <linearGradient id="ooklaGradient" x1="0%" y1="100%" x2="100%" y2="0%">
                     <stop offset="0%" stopColor="#22d3ee" />
-                    <stop offset="50%" stopColor="#a855f7" />
-                    <stop offset="100%" stopColor="#f43f5e" />
+                    <stop offset="60%" stopColor="#06b6d4" />
+                    <stop offset="100%" stopColor="#3b82f6" />
+                  </linearGradient>
+                  
+                  {/* Needle Gradient styling */}
+                  <linearGradient id="needleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#ffffff" stopOpacity="0.9" />
+                    <stop offset="50%" stopColor="#cbd5e1" stopOpacity="0.9" />
+                    <stop offset="100%" stopColor="#94a3b8" stopOpacity="0.9" />
                   </linearGradient>
                 </defs>
-                {/* Labels */}
-                <text x="15" y="102" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">0</text>
-                <text x="48" y="42" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">10</text>
-                <text x="100" y="12" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">100</text>
-                <text x="152" y="42" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">500</text>
-                <text x="185" y="102" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">1K</text>
-                {/* Needle */}
-                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 95px', transition: 'transform 0.4s cubic-bezier(0.34, 1.2, 0.64, 1)' }}>
-                  <line x1="100" y1="95" x2="100" y2="18" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-                  <circle cx="100" cy="95" r="7" fill="currentColor" className="text-primary" />
-                  <circle cx="100" cy="95" r="3" fill="white" />
+
+                {/* Dynamic labels placement using trigonometry */}
+                {labels.map((lbl, idx) => {
+                  const rad = (lbl.angle * Math.PI) / 180
+                  const x = 100 + rLabels * Math.cos(rad)
+                  const y = 100 + rLabels * Math.sin(rad)
+                  return (
+                    <text
+                      key={idx}
+                      x={x}
+                      y={y + 2.5} // slightly offset height for vertical centering
+                      fontSize="7.5"
+                      fontWeight="bold"
+                      fill="currentColor"
+                      className="text-muted-foreground/80 font-sans"
+                      textAnchor="middle"
+                    >
+                      {lbl.value}
+                    </text>
+                  )
+                })}
+
+                {/* Dial Center Info (current speed and unit) */}
+                <text x="100" y="165" fontSize="22" fontWeight="900" fill="currentColor" className="text-foreground tracking-tight tabular-nums" textAnchor="middle">
+                  {isRunning ? (liveSpeed > 0 ? liveSpeed.toFixed(2) : '0.00') : (results ? results.download.toFixed(2) : '0.00')}
+                </text>
+                <text x="100" y="180" fontSize="8" fontWeight="bold" fill="currentColor" className="text-muted-foreground/75 tracking-widest uppercase" textAnchor="middle">
+                  {phase === 'idle' ? 'Mbps' : phase === 'ping' ? 'ms' : 'Mbps'}
+                </text>
+
+                {/* Needle with Circular Hub and Gradient Pointer */}
+                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 100px', transition: 'transform 0.35s cubic-bezier(0.25, 1, 0.5, 1)' }}>
+                  <path d="M 97.5 100 L 100 24 L 102.5 100 Z" fill="url(#needleGrad)" />
+                  <circle cx="100" cy="100" r="9" fill="currentColor" className="text-foreground" />
+                  <circle cx="100" cy="100" r="4" fill="#000000" />
                 </g>
-                {isRunning && (
-                  <text x="100" y="82" fontSize="11" fill="white" fontWeight="bold" textAnchor="middle">
-                    {liveSpeed.toFixed(1)}
-                  </text>
-                )}
               </svg>
             </div>
           ) : (
@@ -365,13 +425,13 @@ export function RealSpeedTest() {
                 <defs>
                   <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
                     <stop offset="0%" stopColor="#22d3ee" />
-                    <stop offset="100%" stopColor="#a855f7" />
+                    <stop offset="100%" stopColor="#3b82f6" />
                   </linearGradient>
                 </defs>
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <div className="text-6xl font-black text-foreground tabular-nums tracking-tight">
-                  {isRunning ? liveSpeed.toFixed(1) : '—'}
+                  {isRunning ? (liveSpeed > 0 ? liveSpeed.toFixed(2) : '0.00') : (results ? results.download.toFixed(2) : '0.00')}
                 </div>
                 <div className="text-sm font-bold text-muted-foreground uppercase tracking-widest mt-1">
                   {phase === 'idle' ? 'Ready' : phase === 'ping' ? 'ms' : 'Mbps'}
@@ -384,7 +444,7 @@ export function RealSpeedTest() {
         {/* Phase Indicator */}
         <div className="h-8 mb-6">
           {isRunning && (
-            <div className="text-base font-semibold text-primary uppercase tracking-widest animate-pulse">
+            <div className="text-base font-semibold text-cyan-400 uppercase tracking-widest animate-pulse">
               {phase === 'ping' ? '⚡ Measuring Latency...' : phase === 'download' ? '⬇ Testing Download...' : phase === 'upload' ? '⬆ Testing Upload...' : ''}
             </div>
           )}
@@ -415,12 +475,12 @@ export function RealSpeedTest() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
                 <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
                   <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Download</div>
-                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.download, 'download')}`}>{results.download.toFixed(1)}</div>
+                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.download, 'download')}`}>{results.download.toFixed(2)}</div>
                   <div className="text-xs text-muted-foreground font-semibold">Mbps</div>
                 </div>
                 <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
                   <div className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Upload</div>
-                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.upload, 'upload')}`}>{results.upload.toFixed(1)}</div>
+                  <div className={`text-4xl font-black mb-1 tabular-nums ${getSpeedColor(results.upload, 'upload')}`}>{results.upload.toFixed(2)}</div>
                   <div className="text-xs text-muted-foreground font-semibold">Mbps</div>
                 </div>
                 <div className="bg-card border border-border rounded-2xl p-6 text-center shadow-sm">
