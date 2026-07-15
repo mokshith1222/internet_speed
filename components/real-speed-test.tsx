@@ -11,10 +11,6 @@ interface SpeedResults {
   timestamp: string
 }
 
-// Cloudflare's public speed test endpoints — served from the nearest edge server worldwide
-const CF_DOWN = 'https://speed.cloudflare.com/__down'
-const CF_UP = 'https://speed.cloudflare.com/__up'
-
 export function RealSpeedTest() {
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -54,27 +50,25 @@ export function RealSpeedTest() {
   }
 
   // ─── PING ──────────────────────────────────────────────────────────────
-  // Ping Cloudflare's nearest edge server with a tiny 0-byte download
   const measurePing = async () => {
     const pings: number[] = []
     const signal = abortControllerRef.current?.signal
 
     // Warm-up request to establish TCP + TLS connection
     try {
-      await fetch(`${CF_DOWN}?bytes=0&_=${Date.now()}`, { cache: 'no-store', signal, mode: 'cors' })
+      await fetch(`/api/ping?_=${Date.now()}`, { cache: 'no-store', signal })
     } catch (_) {}
 
     for (let i = 0; i < 20; i++) {
       if (signal?.aborted) break
       const t0 = performance.now()
       try {
-        const res = await fetch(`${CF_DOWN}?bytes=0&_=${Date.now()}-${i}`, {
+        const res = await fetch(`/api/ping?_=${Date.now()}-${i}`, {
           cache: 'no-store',
           signal,
-          mode: 'cors',
         })
         if (res.ok) {
-          await res.arrayBuffer()
+          await res.json()
           const rtt = performance.now() - t0
           pings.push(rtt)
           setLiveSpeed(Math.round(rtt))
@@ -85,7 +79,6 @@ export function RealSpeedTest() {
 
     if (pings.length === 0) return { ping: 0, jitter: 0 }
 
-    // Sort and drop the worst 20% (outliers)
     pings.sort((a, b) => a - b)
     const trimCount = Math.floor(pings.length * 0.2)
     const trimmed = pings.slice(0, pings.length - trimCount)
@@ -102,12 +95,10 @@ export function RealSpeedTest() {
   }
 
   // ─── DOWNLOAD ──────────────────────────────────────────────────────────
-  // Uses 6 parallel streams downloading from Cloudflare's nearest edge server
-  // and counts every byte as it arrives via ReadableStream
   const measureDownload = async (): Promise<number> => {
     const PARALLEL = 6
     const DURATION_MS = 10000  // 10 seconds for stable average
-    const CHUNK_BYTES = 10_000_000  // 10MB per request
+    const CHUNK_BYTES = 5_000_000  // 5MB per request (optimized for edge functions)
 
     let totalBytes = 0
     let startTime = 0
@@ -117,10 +108,9 @@ export function RealSpeedTest() {
     const downloadStream = async () => {
       while (!finished && !signal?.aborted) {
         try {
-          const res = await fetch(`${CF_DOWN}?bytes=${CHUNK_BYTES}&_=${Date.now()}-${Math.random()}`, {
+          const res = await fetch(`/api/download?size=${CHUNK_BYTES}&_=${Date.now()}-${Math.random()}`, {
             cache: 'no-store',
             signal,
-            mode: 'cors',
           })
           if (!res.ok || !res.body) break
           const reader = res.body.getReader()
@@ -132,13 +122,11 @@ export function RealSpeedTest() {
           try { reader.cancel() } catch (_) {}
         } catch (_) {
           if (finished || signal?.aborted) break
-          // Small delay before retry
           await new Promise(r => setTimeout(r, 200))
         }
       }
     }
 
-    // Launch all streams with a slight stagger
     const streams: Promise<void>[] = []
     for (let i = 0; i < PARALLEL; i++) {
       streams.push(downloadStream())
@@ -148,7 +136,6 @@ export function RealSpeedTest() {
       }
     }
 
-    // Live speed updater
     const interval = setInterval(() => {
       if (startTime > 0) {
         const elapsed = (performance.now() - startTime) / 1000
@@ -160,7 +147,6 @@ export function RealSpeedTest() {
       setProgress(prev => Math.min(prev + 1.2, 58))
     }, 200)
 
-    // Wait for test duration
     await new Promise(r => setTimeout(r, DURATION_MS))
     finished = true
     clearInterval(interval)
@@ -172,18 +158,16 @@ export function RealSpeedTest() {
   }
 
   // ─── UPLOAD ────────────────────────────────────────────────────────────
-  // Uses 4 parallel upload streams to Cloudflare's edge
   const measureUpload = async (): Promise<number> => {
     const PARALLEL = 4
     const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 512 * 1024  // 512KB per POST
+    const CHUNK_SIZE = 256 * 1024  // 256KB per POST
 
     let totalBytes = 0
     const startTime = performance.now()
     let finished = false
     const signal = abortControllerRef.current?.signal
 
-    // Pre-generate a reusable chunk to avoid repeated crypto overhead
     const reusableChunk = new Uint8Array(CHUNK_SIZE)
     for (let i = 0; i < reusableChunk.length; i += 65536) {
       crypto.getRandomValues(reusableChunk.subarray(i, Math.min(i + 65536, reusableChunk.length)))
@@ -192,17 +176,15 @@ export function RealSpeedTest() {
     const uploadStream = async () => {
       while (!finished && !signal?.aborted) {
         try {
-          const res = await fetch(`${CF_UP}?_=${Date.now()}-${Math.random()}`, {
+          const res = await fetch(`/api/upload?_=${Date.now()}-${Math.random()}`, {
             method: 'POST',
             body: reusableChunk,
             cache: 'no-store',
             signal,
-            mode: 'cors',
           })
           if (res.ok) {
             totalBytes += CHUNK_SIZE
           }
-          // Consume response body
           try { await res.text() } catch (_) {}
         } catch (_) {
           if (finished || signal?.aborted) break
@@ -284,7 +266,6 @@ export function RealSpeedTest() {
     }
   }
 
-  // ─── GAUGE ANGLE ───────────────────────────────────────────────────────
   const calculateNeedleAngle = (speed: number) => {
     if (speed <= 0 || phase === 'idle') return -90
     const logSpeed = Math.log10(Math.max(speed, 0.1) + 1)

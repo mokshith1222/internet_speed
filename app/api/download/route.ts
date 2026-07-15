@@ -1,18 +1,37 @@
-export const runtime = 'nodejs'
+export const runtime = 'edge'
 
 export async function GET(request: Request) {
-  // Generate random binary data of specified size
   const { searchParams } = new URL(request.url)
-  const size = parseInt(searchParams.get('size') || '10485760') // Default 10MB
+  const size = parseInt(searchParams.get('size') || '5242880') // Default 5MB
 
-  // Clamp size between 1MB and 100MB
-  const clampedSize = Math.max(1024 * 1024, Math.min(size, 100 * 1024 * 1024))
+  // Clamp size between 1MB and 25MB
+  const clampedSize = Math.max(1024 * 1024, Math.min(size, 25 * 1024 * 1024))
 
-  // Use crypto for fast random data generation instead of a slow loop
-  const { randomBytes } = await import('crypto')
-  const data = randomBytes(clampedSize)
+  // Pre-generate a 64KB random buffer once per request (very fast, low memory)
+  const chunkSize = 65536
+  const chunk = new Uint8Array(chunkSize)
+  crypto.getRandomValues(chunk)
 
-  return new Response(data, {
+  // Construct the stream repeating the generated chunk
+  let bytesSent = 0
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (bytesSent >= clampedSize) {
+        controller.close()
+        return
+      }
+      const remaining = clampedSize - bytesSent
+      if (remaining >= chunkSize) {
+        controller.enqueue(chunk)
+        bytesSent += chunkSize
+      } else {
+        controller.enqueue(chunk.subarray(0, remaining))
+        bytesSent += remaining
+      }
+    }
+  })
+
+  return new Response(stream, {
     headers: {
       'Content-Type': 'application/octet-stream',
       'Content-Length': clampedSize.toString(),

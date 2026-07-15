@@ -45,8 +45,6 @@ export function ThemeProvider({
     }
   }
 
-  if (!mounted) return <>{children}</>
-
   return (
     <ThemeContext.Provider value={{ isDark, toggleTheme }}>
       {children}

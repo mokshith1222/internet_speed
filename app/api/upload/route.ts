@@ -1,14 +1,18 @@
-export const runtime = 'nodejs'
+export const runtime = 'edge'
 
 export async function POST(request: Request) {
   try {
-    const arrayBuffer = await request.arrayBuffer()
+    // Consume the request stream fully to measure upload throughput
+    if (request.body) {
+      const reader = request.body.getReader()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+      }
+    }
     
     return new Response(
-      JSON.stringify({
-        success: true,
-        size: arrayBuffer.byteLength,
-      }),
+      JSON.stringify({ success: true }),
       {
         headers: {
           'Content-Type': 'application/json',

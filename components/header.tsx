@@ -3,28 +3,16 @@
 import Link from 'next/link'
 import { useState, useEffect } from 'react'
 import { Menu, X, Sun, Moon } from 'lucide-react'
+import { useTheme } from '@/components/theme-provider'
 
 export function Header() {
   const [isOpen, setIsOpen] = useState(false)
-  const [isDark, setIsDark] = useState(false)
+  const { isDark, toggleTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
     setMounted(true)
-    setIsDark(document.documentElement.classList.contains('dark'))
   }, [])
-
-  const toggleTheme = () => {
-    const newDark = !isDark
-    setIsDark(newDark)
-    if (newDark) {
-      document.documentElement.classList.add('dark')
-      localStorage.setItem('theme', 'dark')
-    } else {
-      document.documentElement.classList.remove('dark')
-      localStorage.setItem('theme', 'light')
-    }
-  }
 
   const navLinks = [
     { href: '/', label: 'Speed Test' },
