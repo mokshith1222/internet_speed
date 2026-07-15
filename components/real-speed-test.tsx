@@ -21,9 +21,13 @@ export function RealSpeedTest() {
   const [viewMode, setViewMode] = useState<'analog' | 'digital'>('analog')
 
   const abortControllerRef = useRef<AbortController | null>(null)
+  const activeXHRsRef = useRef<XMLHttpRequest[]>([])
 
   useEffect(() => {
-    return () => { abortControllerRef.current?.abort() }
+    return () => {
+      abortControllerRef.current?.abort()
+      activeXHRsRef.current.forEach(xhr => xhr.abort())
+    }
   }, [])
 
   const getSpeedColor = (speed: number, type: 'download' | 'upload') => {
@@ -54,7 +58,7 @@ export function RealSpeedTest() {
     const pings: number[] = []
     const signal = abortControllerRef.current?.signal
 
-    // Warm-up request to establish connection
+    // Warm-up request to establish TCP connection
     try {
       await fetch(`/api/ping?_=${Date.now()}`, { cache: 'no-store', signal })
     } catch (_) {}
@@ -157,51 +161,71 @@ export function RealSpeedTest() {
     return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 100) / 100
   }
 
-  // ─── UPLOAD ────────────────────────────────────────────────────────────
+  // ─── UPLOAD (XHR Progress Tracking to Saturation) ──────────────────────
   const measureUpload = async (): Promise<number> => {
     const PARALLEL = 5
     const DURATION_MS = 8000  // 8 seconds
-    const CHUNK_SIZE = 1024 * 1024  // 1MB per POST
+    const CHUNK_SIZE = 3 * 1024 * 1024  // 3MB per POST chunk (well under Vercel Edge limit)
 
-    let totalBytes = 0
+    let totalUploadedBytes = 0
+    const activeStreams: { xhr: XMLHttpRequest; uploaded: number }[] = []
     const startTime = performance.now()
     let finished = false
-    const signal = abortControllerRef.current?.signal
 
-    const reusableChunk = new Uint8Array(CHUNK_SIZE)
-    for (let i = 0; i < reusableChunk.length; i += 65536) {
-      crypto.getRandomValues(reusableChunk.subarray(i, Math.min(i + 65536, reusableChunk.length)))
+    // Pre-generate random chunk data
+    const chunk = new Uint8Array(CHUNK_SIZE)
+    for (let i = 0; i < chunk.length; i += 65536) {
+      crypto.getRandomValues(chunk.subarray(i, Math.min(i + 65536, chunk.length)))
     }
 
-    const uploadStream = async () => {
-      while (!finished && !signal?.aborted) {
-        try {
-          const res = await fetch(`/api/upload?_=${Date.now()}-${Math.random()}`, {
-            method: 'POST',
-            body: reusableChunk,
-            cache: 'no-store',
-            signal,
-          })
-          if (res.ok) {
-            totalBytes += CHUNK_SIZE
-          }
-          try { await res.text() } catch (_) {}
-        } catch (_) {
-          if (finished || signal?.aborted) break
-          await new Promise(r => setTimeout(r, 200))
+    const uploadWorker = (index: number) => {
+      if (finished || abortControllerRef.current?.signal.aborted) return
+
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `/api/upload?_=${Date.now()}-${index}-${Math.random()}`, true)
+      
+      const streamInfo = { xhr, uploaded: 0 }
+      activeStreams[index] = streamInfo
+      activeXHRsRef.current.push(xhr)
+
+      xhr.upload.onprogress = (e) => {
+        if (finished) return
+        if (e.lengthComputable) {
+          streamInfo.uploaded = e.loaded
         }
       }
+
+      xhr.onload = () => {
+        if (finished) return
+        totalUploadedBytes += CHUNK_SIZE
+        streamInfo.uploaded = 0
+        // Clean up from global abort array
+        activeXHRsRef.current = activeXHRsRef.current.filter(x => x !== xhr)
+        uploadWorker(index)
+      }
+
+      xhr.onerror = () => {
+        if (finished) return
+        streamInfo.uploaded = 0
+        activeXHRsRef.current = activeXHRsRef.current.filter(x => x !== xhr)
+        // Stagger retry
+        setTimeout(() => uploadWorker(index), 100)
+      }
+
+      xhr.send(chunk)
     }
 
-    const streams: Promise<void>[] = []
+    // Launch parallel upload streams
     for (let i = 0; i < PARALLEL; i++) {
-      streams.push(uploadStream())
+      uploadWorker(i)
     }
 
     const interval = setInterval(() => {
       const elapsed = (performance.now() - startTime) / 1000
       if (elapsed > 0.3) {
-        const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
+        const currentProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
+        const total = totalUploadedBytes + currentProgressBytes
+        const mbps = (total * 8) / (elapsed * 1_000_000)
         setLiveSpeed(Math.round(mbps * 100) / 100)
       }
       setProgress(prev => Math.min(prev + 1.2, 95))
@@ -210,14 +234,24 @@ export function RealSpeedTest() {
     await new Promise(r => setTimeout(r, DURATION_MS))
     finished = true
     clearInterval(interval)
-    await Promise.allSettled(streams)
+
+    // Abort active uploads
+    activeStreams.forEach(s => {
+      if (s && s.xhr) {
+        try { s.xhr.abort() } catch (_) {}
+      }
+    })
+    activeXHRsRef.current = []
 
     const elapsed = (performance.now() - startTime) / 1000
-    if (elapsed < 0.5 || totalBytes === 0) return 0
-    return Math.round((totalBytes * 8) / (elapsed * 1_000_000) * 100) / 100
+    if (elapsed < 0.5) return 0
+
+    const finalProgressBytes = activeStreams.reduce((sum, s) => sum + (s ? s.uploaded : 0), 0)
+    const finalTotal = totalUploadedBytes + finalProgressBytes
+    return Math.round((finalTotal * 8) / (elapsed * 1_000_000) * 100) / 100
   }
 
-  // ─── MAIN RUNNER ───────────────────────────────────────────────────────
+  // ─── MAIN TEST RUNNER ──────────────────────────────────────────────────
   const runSpeedTest = async () => {
     abortControllerRef.current = new AbortController()
     setIsRunning(true)
@@ -266,41 +300,63 @@ export function RealSpeedTest() {
     }
   }
 
-  // ─── OOKLA SPEEDOMETER REDESIGN ────────────────────────────────────────
-  // Calculate logarithmic progress along the 270 degree sweep
+  // ─── PIECEWISE LINEAR NEEDLE INTERPOLATION (MATCHES DIAL LABELS EXACTLY) ───
   const calculateNeedleAngle = (speed: number) => {
     let currentSpeed = speed
     if (!isRunning && results) {
       currentSpeed = results.download
     }
-    if (currentSpeed <= 0 || (isRunning && phase === 'ping')) return 225 // Bottom-left starting point
+    if (currentSpeed <= 0 || (isRunning && phase === 'ping')) return 225 // Starting position (0 Mbps)
 
-    // Logarithmic ratio mapping speeds from 0 to 1000 Mbps
-    const logSpeed = Math.log10(Math.max(currentSpeed, 0.1) + 1)
-    const logMax = Math.log10(1001)
-    const ratio = Math.min(logSpeed / logMax, 1)
+    // The dial markings and their exact physical rotation angles on our 270 degree sweep
+    const scale = [
+      { speed: 0, angle: 225 },
+      { speed: 5, angle: 258.75 },
+      { speed: 10, angle: 292.5 },
+      { speed: 50, angle: 326.25 },
+      { speed: 100, angle: 360 },     // 12 o'clock (straight up)
+      { speed: 250, angle: 393.75 },  // 1:30
+      { speed: 500, angle: 427.5 },   // 3:00
+      { speed: 750, angle: 461.25 },  // 4:30
+      { speed: 1000, angle: 495 },    // 5:30 (bottom right limit)
+    ]
 
-    // Sweeps clockwise from 225 degrees to 495 degrees (which is equivalent to 135 degrees)
-    return 225 + ratio * 270
+    if (currentSpeed >= 1000) return 495
+
+    // Find the scale interval for piecewise interpolation
+    let i = 0
+    for (i = 0; i < scale.length - 1; i++) {
+      if (currentSpeed >= scale[i].speed && currentSpeed < scale[i + 1].speed) {
+        break
+      }
+    }
+
+    const s0 = scale[i].speed
+    const a0 = scale[i].angle
+    const s1 = scale[i + 1].speed
+    const a1 = scale[i + 1].angle
+
+    const ratio = (currentSpeed - s0) / (s1 - s0)
+    return a0 + ratio * (a1 - a0)
   }
 
   const needleAngle = calculateNeedleAngle(liveSpeed)
 
-  // Mathematically plot markers dynamically inside the 270 degree arc
+  // Labels placed at uniform angle intervals matching the scale mapping
   const labels = [
     { value: '0', angle: 135 },
     { value: '5', angle: 168.75 },
     { value: '10', angle: 202.5 },
     { value: '50', angle: 236.25 },
-    { value: '100', angle: 270 },
+    { value: '100', angle: 270 },     // 12 o'clock
     { value: '250', angle: 303.75 },
     { value: '500', angle: 337.5 },
     { value: '750', angle: 371.25 },
     { value: '1K', angle: 405 },
   ]
 
-  const rLabels = 60 // Radius placement for speed labels
-  const strokeDash = 353.43 // Arc length for radius 75 circle (270 degrees sweep)
+  const rLabels = 60
+  const strokeDash = 353.43
 
   return (
     <div className="w-full max-w-3xl mx-auto my-12 px-4">
@@ -364,7 +420,6 @@ export function RealSpeedTest() {
                     <stop offset="100%" stopColor="#3b82f6" />
                   </linearGradient>
                   
-                  {/* Needle Gradient styling */}
                   <linearGradient id="needleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
                     <stop offset="0%" stopColor="#ffffff" stopOpacity="0.9" />
                     <stop offset="50%" stopColor="#cbd5e1" stopOpacity="0.9" />
@@ -372,7 +427,7 @@ export function RealSpeedTest() {
                   </linearGradient>
                 </defs>
 
-                {/* Dynamic labels placement using trigonometry */}
+                {/* Dynamic labels placement */}
                 {labels.map((lbl, idx) => {
                   const rad = (lbl.angle * Math.PI) / 180
                   const x = 100 + rLabels * Math.cos(rad)
@@ -381,7 +436,7 @@ export function RealSpeedTest() {
                     <text
                       key={idx}
                       x={x}
-                      y={y + 2.5} // slightly offset height for vertical centering
+                      y={y + 2.5}
                       fontSize="7.5"
                       fontWeight="bold"
                       fill="currentColor"
@@ -393,7 +448,7 @@ export function RealSpeedTest() {
                   )
                 })}
 
-                {/* Dial Center Info (current speed and unit) */}
+                {/* Dial Center Info */}
                 <text x="100" y="165" fontSize="22" fontWeight="900" fill="currentColor" className="text-foreground tracking-tight tabular-nums" textAnchor="middle">
                   {isRunning ? (liveSpeed > 0 ? liveSpeed.toFixed(2) : '0.00') : (results ? results.download.toFixed(2) : '0.00')}
                 </text>
@@ -401,7 +456,7 @@ export function RealSpeedTest() {
                   {phase === 'idle' ? 'Mbps' : phase === 'ping' ? 'ms' : 'Mbps'}
                 </text>
 
-                {/* Needle with Circular Hub and Gradient Pointer */}
+                {/* Needle */}
                 <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 100px', transition: 'transform 0.35s cubic-bezier(0.25, 1, 0.5, 1)' }}>
                   <path d="M 97.5 100 L 100 24 L 102.5 100 Z" fill="url(#needleGrad)" />
                   <circle cx="100" cy="100" r="9" fill="currentColor" className="text-foreground" />
