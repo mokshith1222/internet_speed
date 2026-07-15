@@ -20,14 +20,12 @@ export function RealSpeedTest() {
   const [error, setError] = useState('')
   const [viewMode, setViewMode] = useState<'digital' | 'analog'>('analog')
 
-  // Ref to track component unmount and abort fetch requests
   const abortControllerRef = useRef<AbortController | null>(null)
+  const liveSpeedRef = useRef(0)
 
   useEffect(() => {
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort()
-      }
+      abortControllerRef.current?.abort()
     }
   }, [])
 
@@ -54,153 +52,191 @@ export function RealSpeedTest() {
     return 'text-red-500'
   }
 
+  // ─── PING: measure raw RTT ───────────────────────────────────────────────
   const measurePing = async () => {
     const pings: number[] = []
-    const iterations = 10
+    // warm-up first
+    try { await fetch('/api/ping', { cache: 'no-store' }) } catch (_) {}
 
-    for (let i = 0; i < iterations; i++) {
+    for (let i = 0; i < 10; i++) {
       if (abortControllerRef.current?.signal.aborted) break
-      
-      const start = performance.now()
+      const t0 = performance.now()
       try {
-        const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 5000)
-        const response = await fetch('/api/ping', {
+        const res = await fetch('/api/ping', {
           cache: 'no-store',
           signal: abortControllerRef.current?.signal,
         })
-        clearTimeout(timeoutId)
-        
-        if (response.ok) {
-          const end = performance.now()
-          const pingTime = Math.max(1, end - start)
-          pings.push(pingTime)
-          setLiveSpeed(Math.round(pingTime))
+        if (res.ok) {
+          const rtt = performance.now() - t0
+          pings.push(rtt)
+          setLiveSpeed(Math.round(rtt))
         }
-      } catch (err) {
-        // Silently continue
-      }
+      } catch (_) {}
       setProgress(prev => Math.min(prev + 1.5, 15))
     }
 
     if (pings.length === 0) return { ping: 0, jitter: 0 }
 
-    const avgPing = pings.reduce((a, b) => a + b, 0) / pings.length
-    const jitter = pings.length > 1
-      ? Math.sqrt(pings.reduce((sum, p) => sum + Math.pow(p - avgPing, 2), 0) / pings.length)
+    // Sort and drop top 10% outliers
+    pings.sort((a, b) => a - b)
+    const trimmed = pings.slice(0, Math.max(1, Math.floor(pings.length * 0.9)))
+    const avg = trimmed.reduce((a, b) => a + b, 0) / trimmed.length
+    const jitter = trimmed.length > 1
+      ? trimmed.reduce((s, p) => s + Math.abs(p - avg), 0) / trimmed.length
       : 0
 
-    return { ping: Math.round(avgPing * 10) / 10, jitter: Math.round(jitter * 10) / 10 }
+    return { ping: Math.round(avg * 10) / 10, jitter: Math.round(jitter * 10) / 10 }
   }
 
-  const measureDownload = async () => {
-    try {
-      const testSizes = [1048576, 2097152, 5242880] // 1MB, 2MB, 5MB
-      let totalSpeed = 0
-      let validTests = 0
+  // ─── DOWNLOAD: parallel streams, streaming byte count ───────────────────
+  const measureDownload = async (): Promise<number> => {
+    // We run PARALLEL_COUNT simultaneous downloads and measure total throughput
+    const PARALLEL_COUNT = 6
+    const TEST_DURATION_MS = 8000 // 8 seconds of sustained measurement
+    const CHUNK_SIZE = 5 * 1024 * 1024 // 5MB per stream request
 
-      for (const size of testSizes) {
-        if (abortControllerRef.current?.signal.aborted) break
+    let totalBytes = 0
+    let startTime = 0
+    let finished = false
 
-        const start = performance.now()
+    const signal = abortControllerRef.current?.signal
+
+    const runStream = async () => {
+      while (!finished && !signal?.aborted) {
         try {
-          const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000)
-          const response = await fetch(`/api/download?size=${size}`, {
+          const res = await fetch(`/api/download?size=${CHUNK_SIZE}&t=${Date.now()}`, {
             cache: 'no-store',
-            signal: abortControllerRef.current?.signal,
+            signal,
           })
-          clearTimeout(timeoutId)
+          if (!res.ok || !res.body) break
 
-          if (response.ok) {
-            const ttfb = performance.now()
-            await response.blob()
-            const end = performance.now()
-            
-            // Subtract TTFB to get raw throughput time
-            let timeSec = (end - ttfb) / 1000
-            if (timeSec < 0.001) timeSec = 0.01 // Prevent division by zero
-            
-            const sizeMb = size / (1024 * 1024)
-            const speedMbps = (sizeMb / timeSec) * 8
-            
-            if (!isNaN(speedMbps) && speedMbps > 0 && speedMbps < 10000) {
-              totalSpeed += speedMbps
-              validTests++
-              setLiveSpeed(Math.round(speedMbps * 10) / 10)
-            }
+          const reader = res.body.getReader()
+          while (!finished) {
+            const { done, value } = await reader.read()
+            if (done || !value) break
+            totalBytes += value.byteLength
           }
-        } catch (err) {
-          // Silently continue
+          reader.cancel().catch(() => {})
+        } catch (_) {
+          break
         }
-        setProgress(prev => Math.min(prev + 15, 55))
       }
-
-      if (validTests === 0) return 0
-      return Math.round((totalSpeed / validTests) * 10) / 10
-    } catch (err) {
-      return 0
     }
+
+    // Start timer once first connection is established (to ignore connection overhead)
+    const streams: Promise<void>[] = []
+    for (let i = 0; i < PARALLEL_COUNT; i++) {
+      streams.push(runStream())
+      if (i === 0) {
+        // Give first stream a tiny head start to establish connection
+        await new Promise(r => setTimeout(r, 50))
+        startTime = performance.now()
+      }
+    }
+
+    // Update live speed display every 250ms
+    const interval = setInterval(() => {
+      if (startTime > 0) {
+        const elapsed = (performance.now() - startTime) / 1000
+        if (elapsed > 0.5) {
+          const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
+          liveSpeedRef.current = mbps
+          setLiveSpeed(Math.round(mbps * 10) / 10)
+        }
+      }
+      // progress from 15 to 60
+      setProgress(prev => Math.min(prev + 1.5, 60))
+    }, 250)
+
+    await new Promise(r => setTimeout(r, TEST_DURATION_MS))
+    finished = true
+    clearInterval(interval)
+
+    // Wait for all streams to exit cleanly
+    await Promise.allSettled(streams)
+
+    const elapsed = (performance.now() - startTime) / 1000
+    if (elapsed < 0.5 || totalBytes === 0) return 0
+
+    const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
+    return Math.round(mbps * 10) / 10
   }
 
-  const measureUpload = async () => {
-    try {
-      const testSizes = [131072, 262144, 524288] // 128KB, 256KB, 512KB
-      let totalSpeed = 0
-      let validTests = 0
+  // ─── UPLOAD: parallel streams, streaming byte count ────────────────────
+  const measureUpload = async (): Promise<number> => {
+    const PARALLEL_COUNT = 4
+    const TEST_DURATION_MS = 6000 // 6 seconds
+    const CHUNK_SIZE = 256 * 1024 // 256KB chunks (safe for Vercel)
 
-      for (const size of testSizes) {
-        if (abortControllerRef.current?.signal.aborted) break
+    let totalBytes = 0
+    const startTime = performance.now()
+    let finished = false
 
-        const data = new Uint8Array(size)
-        if (typeof crypto !== 'undefined') {
-          for (let i = 0; i < data.length; i += 65536) {
-            crypto.getRandomValues(data.subarray(i, Math.min(i + 65536, data.length)))
-          }
-        }
+    const signal = abortControllerRef.current?.signal
 
-        const start = performance.now()
+    const generateChunk = () => {
+      const data = new Uint8Array(CHUNK_SIZE)
+      // fill in 64KB batches to avoid quota error
+      for (let i = 0; i < data.length; i += 65536) {
+        crypto.getRandomValues(data.subarray(i, Math.min(i + 65536, data.length)))
+      }
+      return data
+    }
+
+    const runUploadStream = async () => {
+      while (!finished && !signal?.aborted) {
         try {
-          const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 15000)
-          const response = await fetch('/api/upload', {
+          const chunk = generateChunk()
+          const res = await fetch('/api/upload', {
             method: 'POST',
-            body: data,
+            body: chunk,
             cache: 'no-store',
-            signal: abortControllerRef.current?.signal,
+            signal,
           })
-          clearTimeout(timeoutId)
-
-          if (response.ok) {
-            const end = performance.now()
-            let timeSec = (end - start) / 1000
-            if (timeSec < 0.001) timeSec = 0.01
-
-            const sizeMb = size / (1024 * 1024)
-            const speedMbps = (sizeMb / timeSec) * 8
-            
-            if (!isNaN(speedMbps) && speedMbps > 0 && speedMbps < 10000) {
-              totalSpeed += speedMbps
-              validTests++
-              setLiveSpeed(Math.round(speedMbps * 10) / 10)
-            }
+          if (res.ok) {
+            totalBytes += CHUNK_SIZE
           }
-        } catch (err) {
-          // Silently continue
+        } catch (_) {
+          break
         }
-        setProgress(prev => Math.min(prev + 15, 95))
       }
-
-      if (validTests === 0) return 0
-      return Math.round((totalSpeed / validTests) * 10) / 10
-    } catch (err) {
-      return 0
     }
+
+    const streams: Promise<void>[] = []
+    for (let i = 0; i < PARALLEL_COUNT; i++) {
+      streams.push(runUploadStream())
+    }
+
+    const interval = setInterval(() => {
+      const elapsed = (performance.now() - startTime) / 1000
+      if (elapsed > 0.5) {
+        const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
+        liveSpeedRef.current = mbps
+        setLiveSpeed(Math.round(mbps * 10) / 10)
+      }
+      setProgress(prev => Math.min(prev + 1.5, 95))
+    }, 250)
+
+    await new Promise(r => setTimeout(r, TEST_DURATION_MS))
+    finished = true
+    clearInterval(interval)
+
+    await Promise.allSettled(streams)
+
+    const elapsed = (performance.now() - startTime) / 1000
+    if (elapsed < 0.5 || totalBytes === 0) return 0
+
+    const mbps = (totalBytes * 8) / (elapsed * 1_000_000)
+    return Math.round(mbps * 10) / 10
   }
 
+  // ─── MAIN TEST RUNNER ──────────────────────────────────────────────────
   const runSpeedTest = async () => {
-    // Reset state
     abortControllerRef.current = new AbortController()
     setIsRunning(true)
     setProgress(0)
     setLiveSpeed(0)
+    liveSpeedRef.current = 0
     setResults(null)
     setError('')
 
@@ -210,15 +246,19 @@ export function RealSpeedTest() {
       if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       setPhase('download')
+      setLiveSpeed(0)
+      setProgress(15)
       const download = await measureDownload()
       if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       setPhase('upload')
+      setLiveSpeed(0)
+      setProgress(60)
       const upload = await measureUpload()
       if (abortControllerRef.current.signal.aborted) throw new Error('Aborted')
 
       if (download === 0 && upload === 0 && pingResults.ping === 0) {
-        setError('Network Error: Unable to reach the testing servers. Please try again.')
+        setError('Could not reach test servers. Please check your connection and try again.')
       } else {
         setResults({
           download,
@@ -230,7 +270,7 @@ export function RealSpeedTest() {
       }
     } catch (err) {
       if ((err as Error).message !== 'Aborted') {
-        setError('An unexpected error occurred during the test.')
+        setError('An unexpected error occurred. Please try again.')
       }
     } finally {
       setIsRunning(false)
@@ -240,22 +280,21 @@ export function RealSpeedTest() {
     }
   }
 
-  // Smooth analog gauge calculation mapping 0-1000 Mbps to a -90 to +90 degree angle.
+  // ─── GAUGE ─────────────────────────────────────────────────────────────
   const calculateNeedleAngle = (speed: number) => {
     if (speed <= 0 || phase === 'idle') return -90
-    const maxSpeed = 1000 
-    const logSpeed = Math.log10(speed + 1)
-    const logMax = Math.log10(maxSpeed + 1)
-    let ratio = logSpeed / logMax
-    if (ratio > 1) ratio = 1
-    return -90 + (ratio * 180) // 180 degree semi-circle
+    // Logarithmic scale: 0→-90°, 1→~-75°, 10→~-45°, 100→0°, 1000→+90°
+    const logSpeed = Math.log10(Math.max(speed, 0.1) + 1)
+    const logMax = Math.log10(1001)
+    const ratio = Math.min(logSpeed / logMax, 1)
+    return -90 + ratio * 180
   }
 
   const needleAngle = calculateNeedleAngle(liveSpeed)
 
   return (
     <div className="w-full max-w-3xl mx-auto my-12 px-4">
-      
+
       {/* View Mode Toggle */}
       <div className="flex justify-center mb-10">
         <div className="bg-secondary/40 p-1.5 rounded-full inline-flex border border-border shadow-sm">
@@ -282,45 +321,53 @@ export function RealSpeedTest() {
         {/* Visual Gauge */}
         <div className="mb-12 w-full flex justify-center">
           {viewMode === 'analog' ? (
-            <div className="relative w-64 h-32 sm:w-80 sm:h-40 overflow-hidden">
-              <svg className="absolute inset-0 w-full h-full drop-shadow-2xl" viewBox="0 0 200 100">
-                {/* Background Track */}
-                <path d="M 10 90 A 80 80 0 0 1 190 90" fill="none" stroke="currentColor" strokeWidth="16" className="text-muted/20" strokeLinecap="round" />
-                
-                {/* Active Track */}
+            <div className="relative w-64 h-36 sm:w-80 sm:h-44 overflow-hidden">
+              <svg className="absolute inset-0 w-full h-full drop-shadow-2xl" viewBox="0 0 200 105">
+                {/* Background arc */}
+                <path d="M 15 95 A 85 85 0 0 1 185 95" fill="none" stroke="currentColor" strokeWidth="14" className="text-muted/20" strokeLinecap="round" />
+
+                {/* Active arc (progress) */}
                 {isRunning && (
-                  <path 
-                    d="M 10 90 A 80 80 0 0 1 190 90" 
-                    fill="none" 
-                    stroke="url(#speedGradient)" 
-                    strokeWidth="16" 
+                  <path
+                    d="M 15 95 A 85 85 0 0 1 185 95"
+                    fill="none"
+                    stroke="url(#speedGradient)"
+                    strokeWidth="14"
                     strokeLinecap="round"
-                    strokeDasharray="251.2"
-                    strokeDashoffset={251.2 - (progress / 100) * 251.2}
+                    strokeDasharray="266.9"
+                    strokeDashoffset={266.9 - (progress / 100) * 266.9}
                     className="transition-all duration-300 ease-out"
                   />
                 )}
-                
+
                 <defs>
                   <linearGradient id="speedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor="#3b82f6" />
-                    <stop offset="50%" stopColor="#8b5cf6" />
-                    <stop offset="100%" stopColor="#ef4444" />
+                    <stop offset="0%" stopColor="#22d3ee" />
+                    <stop offset="50%" stopColor="#a855f7" />
+                    <stop offset="100%" stopColor="#f43f5e" />
                   </linearGradient>
                 </defs>
 
-                {/* Markers */}
-                <text x="10" y="98" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="start">0</text>
-                <text x="50" y="30" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">10</text>
-                <text x="100" y="8" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">100</text>
-                <text x="150" y="30" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="middle">500</text>
-                <text x="190" y="98" fontSize="6" fill="currentColor" className="text-muted-foreground" textAnchor="end">1000+</text>
+                {/* Speed labels */}
+                <text x="15" y="102" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">0</text>
+                <text x="48" y="42" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">10</text>
+                <text x="100" y="12" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">100</text>
+                <text x="152" y="42" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">500</text>
+                <text x="185" y="102" fontSize="7" fill="currentColor" className="text-muted-foreground" textAnchor="middle">1K</text>
 
                 {/* Needle */}
-                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 90px', transition: 'transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)' }}>
-                  <path d="M 96 90 L 100 15 L 104 90 Z" fill="currentColor" className="text-foreground drop-shadow-lg" />
-                  <circle cx="100" cy="90" r="8" fill="currentColor" className="text-primary shadow-lg" />
+                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '100px 95px', transition: 'transform 0.4s cubic-bezier(0.34, 1.2, 0.64, 1)' }}>
+                  <line x1="100" y1="95" x2="100" y2="18" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+                  <circle cx="100" cy="95" r="7" fill="currentColor" className="text-primary" />
+                  <circle cx="100" cy="95" r="3" fill="white" />
                 </g>
+
+                {/* Live speed text inside gauge */}
+                {isRunning && (
+                  <text x="100" y="82" fontSize="11" fill="white" fontWeight="bold" textAnchor="middle">
+                    {liveSpeed.toFixed(1)}
+                  </text>
+                )}
               </svg>
             </div>
           ) : (
@@ -329,20 +376,26 @@ export function RealSpeedTest() {
                 <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="8" className="text-muted/20" />
                 {isRunning && (
                   <circle
-                    cx="100" cy="100" r="90" fill="none" stroke="currentColor" strokeWidth="8"
+                    cx="100" cy="100" r="90" fill="none" stroke="url(#ringGradient)" strokeWidth="8"
                     strokeDasharray={`${(progress / 100) * 565.5} 565.5`}
                     strokeLinecap="round"
-                    className="text-primary transition-all duration-300 ease-out"
+                    className="transition-all duration-300 ease-out"
                     style={{ transform: 'rotate(-90deg)', transformOrigin: '100px 100px' }}
                   />
                 )}
+                <defs>
+                  <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#22d3ee" />
+                    <stop offset="100%" stopColor="#a855f7" />
+                  </linearGradient>
+                </defs>
               </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center pt-2">
-                <div className="text-6xl font-black text-foreground tabular-nums tracking-tight transition-all">
-                  {isRunning ? liveSpeed : '0'}
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <div className="text-6xl font-black text-foreground tabular-nums tracking-tight">
+                  {isRunning ? liveSpeed.toFixed(1) : '—'}
                 </div>
                 <div className="text-sm font-bold text-muted-foreground uppercase tracking-widest mt-1">
-                  {phase === 'idle' ? 'Ready' : (phase === 'ping' ? 'ms' : 'Mbps')}
+                  {phase === 'idle' ? 'Ready' : phase === 'ping' ? 'ms' : 'Mbps'}
                 </div>
               </div>
             </div>
@@ -352,14 +405,12 @@ export function RealSpeedTest() {
         {/* Phase Indicator */}
         <div className="h-8 mb-6">
           {isRunning && (
-            <div className="text-lg font-semibold text-primary uppercase tracking-widest animate-pulse">
-              Measuring {phase}...
+            <div className="text-base font-semibold text-primary uppercase tracking-widest animate-pulse">
+              {phase === 'ping' ? '⚡ Measuring Latency...' : phase === 'download' ? '⬇ Testing Download...' : phase === 'upload' ? '⬆ Testing Upload...' : ''}
             </div>
           )}
           {!isRunning && !results && !error && (
-            <div className="text-lg font-medium text-muted-foreground">
-              Click Start to Begin
-            </div>
+            <div className="text-lg font-medium text-muted-foreground">Click Start to Begin</div>
           )}
         </div>
 
@@ -370,7 +421,7 @@ export function RealSpeedTest() {
           </div>
         )}
 
-        {/* Action Button */}
+        {/* Start Button */}
         {!isRunning && !results ? (
           <button
             onClick={runSpeedTest}
