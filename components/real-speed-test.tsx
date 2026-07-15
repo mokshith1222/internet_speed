@@ -13,8 +13,8 @@ interface SpeedResults {
 
 // Calibration multipliers to align raw browser throughput with raw line-speed
 const CALIBRATION = {
-  download: 1.36, // Calibrated for 10MB chunk edge throughput
-  upload: 2.65,   // Calibrated for XHR parallel upload saturation
+  download: 1.1,  // Calibrated for 10MB chunk edge throughput
+  upload: 1.85,   // Calibrated for XHR parallel upload saturation
 }
 
 export function RealSpeedTest() {
